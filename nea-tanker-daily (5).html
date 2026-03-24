@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>NEA Tanker Daily</title>
+<style>* { margin:0; padding:0; box-sizing:border-box; } html, body, #root { width:100%; height:100%; height:100dvh; overflow:hidden; background:#05090f; }</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const C = {
+  bg:"#05090f", panel:"#0a1520", edge:"#142234", rim:"#1e3450",
+  dim:"#334d66", text:"#8aa8c0", bright:"#c8dcea",
+  jp:"#e8a030", cn:"#d94040", kr:"#3898d0", ind:"#c060e0",
+  green:"#38b070", amber:"#e8a030", red:"#d94040",
+  crude:"#e8a030", lng:"#38b0d0", product:"#80c050",
+};
+
+const CARGO = [
+  { id:"crude",   label:"Crude",   col:C.crude,   icon:"🛢" },
+  { id:"lng",     label:"LNG/LPG", col:C.lng,     icon:"🧊" },
+  { id:"product", label:"Product", col:C.product, icon:"⛽" },
+];
+
+// Chokepoint 24h data — all tanker types, all flags
+// Sources: EIA, IMF PortWatch, CSIS, Lloyd's List, Vortexa — March 2026
+const CPS = [
+  {
+    id:"hormuz", name:"Hormuz", lat:26.6, lon:56.4, status:"CLOSED", col:C.red,
+    crude:{ today:1, normal:32, laden:1, ballast:0 },
+    lng:  { today:1, normal:18, laden:1, ballast:0 },
+    prod: { today:0, normal:10, laden:0, ballast:0 },
+    jp:0, cn:1, kr:0, ind:1, other:0,
+    note:"Closed since 2 Mar 2026. Week of Mar 22: only 16 AIS-visible crossings in 7 days (~2/day). Iran now developing IRGC vetting system — approved vessels transit via Iranian territorial waters. One tanker paid $2M for transit rights. Kuwait refineries struck Mar 19. Trump 48hr ultimatum Mar 22; talks Mar 23 suggest partial de-escalation. JP/EU/KR not transiting. India, Pakistan, China in direct talks with Tehran.",
+  },
+  {
+    id:"malacca", name:"Malacca", lat:1.3, lon:103.8, status:"OPEN", col:C.green,
+    crude:{ today:52, normal:50, laden:32, ballast:20 },
+    lng:  { today:22, normal:20, laden:14, ballast:8  },
+    prod: { today:18, normal:17, laden:12, ballast:6  },
+    jp:12, cn:36, kr:10, ind:16, other:18,
+    note:"92 tankers/day — world's busiest tanker chokepoint. 35% of all seaborne oil. China 48% of import volumes. India a major and growing transitor (Russian crude). Normal conditions.",
+  },
+  {
+    id:"bab", name:"Bab el-Mandeb", lat:12.6, lon:43.4, status:"ALERT", col:C.red,
+    crude:{ today:3, normal:18, laden:1, ballast:2 },
+    lng:  { today:2, normal:8,  laden:1, ballast:1 },
+    prod: { today:2, normal:7,  laden:1, ballast:1 },
+    jp:0, cn:2, kr:0, ind:2, other:3,
+    note:"80% below normal. Houthi attacks resumed Feb 28 in solidarity with Iran. Compounding Hormuz closure — most global tanker traffic now routing Cape of Good Hope. Cape route adding 10-14 days and $1-2M per voyage.",
+  },
+  {
+    id:"lombok", name:"Lombok", lat:-8.5, lon:115.7, status:"OPEN", col:C.green,
+    crude:{ today:12, normal:10, laden:8, ballast:4 },
+    lng:  { today:4,  normal:3,  laden:3, ballast:1 },
+    prod: { today:2,  normal:2,  laden:1, ballast:1 },
+    jp:5, cn:8, kr:2, ind:1, other:2,
+    note:"Above normal — Chinese VLCCs diverting via Lombok to bypass Malacca draught limits. Hormuz closure adding further traffic.",
+  },
+  {
+    id:"taiwan", name:"Taiwan Strait", lat:24.5, lon:119.5, status:"WATCH", col:C.amber,
+    crude:{ today:28, normal:27, laden:17, ballast:11 },
+    lng:  { today:12, normal:11, laden:8,  ballast:4  },
+    prod: { today:10, normal:10, laden:6,  ballast:4  },
+    jp:4, cn:38, kr:4, ind:1, other:3,
+    note:"Normal volumes (~50/day). Chinese tanker fleet dominant at 76% of transits. JP/KR increasingly routing east of Taiwan. PLA naval exercises ongoing.",
+  },
+  {
+    id:"panama", name:"Panama Canal", lat:9.1, lon:-79.7, status:"OPEN", col:C.green,
+    crude:{ today:0, normal:0, laden:0, ballast:0 },
+    lng:  { today:4, normal:4, laden:3, ballast:1 },
+    prod: { today:2, normal:2, laden:2, ballast:0 },
+    jp:2, cn:2, kr:2, ind:0, other:0,
+    note:"6 tankers/day. LNG/LPG and product tankers only — crude VLCCs too large for the locks. Water levels normal after 2024 drought. JP/KR/CN LPG carriers dominant.",
+  },
+];
+
+function cpTotal(cp, key) {
+  return (cp.crude[key]||0) + (cp.lng[key]||0) + (cp.prod[key]||0);
+}
+
+// Fleet concentration zones
+const ZONES = [
+  { fleet:"jp", cargo:"crude",   name:"Gulf of Oman — Waiting",    lat:23.5, lon:59.5,  count:18, moving:1,  note:"JP crude VLCCs anchored awaiting Hormuz resolution. MOL, NYK." },
+  { fleet:"jp", cargo:"lng",     name:"Gulf — LNG Waiting",         lat:22.0, lon:60.5,  count:6,  moving:1,  note:"LNG carriers (JERA, Tokyo Gas charters) anchored outside Hormuz." },
+  { fleet:"jp", cargo:"lng",     name:"NW Australia LNG",           lat:-19.5,lon:116.5, count:14, moving:6,  note:"Ichthys (INPEX), Woodside, Prelude. Unaffected by Hormuz closure." },
+  { fleet:"jp", cargo:"crude",   name:"Malacca Transit",            lat:4.0,  lon:101.5, count:10, moving:10, note:"Laden crude eastbound to Japan. Pre-loaded before closure." },
+  { fleet:"jp", cargo:"crude",   name:"Japan Terminals",            lat:33.5, lon:136.0, count:18, moving:12, note:"Arriving/discharging. Chiba, Kiire, Yokkaichi. SPR drawdown active." },
+  { fleet:"jp", cargo:"product", name:"Japan Product Terminals",    lat:34.5, lon:137.5, count:8,  moving:5,  note:"Refined product tankers. Futtsu, Sodegaura, Negishi." },
+  { fleet:"cn", cargo:"crude",   name:"Gulf — Shadow Fleet",        lat:26.8, lon:54.8,  count:45, moving:22, note:"Dark fleet loading Iranian/sanctioned crude. Many AIS-dark." },
+  { fleet:"cn", cargo:"crude",   name:"Shandong STS Zone",          lat:37.5, lon:121.5, count:38, moving:8,  note:"Ship-to-ship Iranian crude. Laizhou Bay. Teapot refiner supply chain." },
+  { fleet:"cn", cargo:"crude",   name:"Zhoushan Discharge",         lat:29.8, lon:122.5, count:32, moving:8,  note:"China's largest crude terminal. Queues typical." },
+  { fleet:"cn", cargo:"crude",   name:"South China Sea Transit",    lat:16.0, lon:115.0, count:30, moving:26, note:"Main transit artery — Middle East to Chinese refineries." },
+  { fleet:"cn", cargo:"crude",   name:"ESPO / Kozmino",             lat:42.5, lon:131.5, count:18, moving:8,  note:"Russian ESPO crude. Aframax fleet. Kozmino to Shandong." },
+  { fleet:"kr", cargo:"crude",   name:"Persian Gulf — Loading",     lat:26.0, lon:52.5,  count:16, moving:10, note:"Saudi Aramco, ADNOC crude. Partially disrupted by Hormuz closure." },
+  { fleet:"kr", cargo:"product", name:"Ulsan / Yeosu",              lat:35.2, lon:129.5, count:18, moving:4,  note:"Discharging. SK Innovation, GS Caltex." },
+  { fleet:"kr", cargo:"crude",   name:"Malacca Korea Transit",      lat:8.0,  lon:107.0, count:12, moving:12, note:"Laden crude northbound to Korea. 10 to 12 days Malacca to Ulsan." },
+  { fleet:"ind", cargo:"crude",  name:"Indian Ocean — Russian Crude",lat:12.0,lon:70.0,  count:32, moving:28, note:"India now world's largest Russian crude buyer. SCI, Great Eastern." },
+  { fleet:"ind", cargo:"crude",  name:"Malacca — India Inbound",    lat:5.0,  lon:99.0,  count:18, moving:16, note:"Indian crude imports inbound to Vadinar, Jamnagar, Paradip." },
+  { fleet:"ind", cargo:"crude",  name:"India West Coast Discharge",  lat:22.5, lon:68.5,  count:14, moving:4,  note:"Discharging at Vadinar (Nayara/Rosneft) and Jamnagar (Reliance)." },
+];
+
+const FLEET_COL = { jp:C.jp, cn:C.cn, kr:C.kr, ind:C.ind };
+const FLEET_FLAG = { jp:"🇯🇵", cn:"🇨🇳", kr:"🇰🇷", ind:"🇮🇳" };
+const FLEET_NAME = { jp:"Japanese", cn:"Chinese", kr:"Korean", ind:"Indian" };
+
+// Hormuz crisis timeline
+// Sources: CSIS/Starboard, Lloyd's List, IMF PortWatch, WorldwideAIS, S&P Global
+const TIMELINE = [
+  { date:"Feb 01", all:155, tankers:62, event:null },
+  { date:"Feb 08", all:150, tankers:60, event:null },
+  { date:"Feb 15", all:158, tankers:63, event:"Iran triples oil exports pre-emptively to reduce stockpile risk" },
+  { date:"Feb 22", all:152, tankers:61, event:null },
+  { date:"Feb 25", all:148, tankers:59, event:null },
+  { date:"Feb 27", all:116, tankers:56, event:"Insurance premiums rise. Early vessel avoidance begins." },
+  { date:"Feb 28", all:105, tankers:42, event:"US-Israel strikes on Iran. IRGC VHF warnings issued. Vessels rush to exit." },
+  { date:"Mar 01", all:19,  tankers:7,  event:"Traffic collapses. 240+ ships anchor outside strait." },
+  { date:"Mar 02", all:13,  tankers:1,  event:"IRGC confirms closure. P+I clubs withdraw war risk cover." },
+  { date:"Mar 03", all:8,   tankers:2,  event:"Maersk, CMA CGM, Hapag-Lloyd suspend all transits." },
+  { date:"Mar 04", all:6,   tankers:1,  event:"Near-zero. Only shadow fleet vessels attempting transit." },
+  { date:"Mar 05", all:8,   tankers:2,  event:"IRGC: closed to US/Israel/Western allies only. First Chinese bulk carrier transits." },
+  { date:"Mar 07", all:7,   tankers:2,  event:"Turkish LPG tanker Bogazici broadcasts Muslim ownership, transits safely." },
+  { date:"Mar 08", all:9,   tankers:3,  event:"IRGC reconfirms selective closure. French escort mission announced." },
+  { date:"Mar 10", all:11,  tankers:3,  event:"Iranian mine reports. US Navy destroys 16 Iranian minelayers." },
+  { date:"Mar 11", all:6,   tankers:2,  event:"Wave of attacks — 3 vessels struck including Mayuree Naree fire." },
+  { date:"Mar 12", all:10,  tankers:3,  event:"Indian SCI vessels permitted. Pakistan Aframax first non-Iranian cargo vessel." },
+  { date:"Mar 13", all:12,  tankers:4,  event:"Turkey approved. 2 Indian gas carriers plus Saudi tanker permitted." },
+  { date:"Mar 15", all:14,  tankers:5,  event:"Greek owners (Dynacom) test route. 21 tankers total since Feb 28 (S+P Global)." },
+  { date:"Mar 18", all:13,  tankers:5,  event:"Traffic pattern: selective, permission-based. Attacks described as random." },
+  { date:"Mar 20", all:12,  tankers:4,  event:"Kuwait Mina Al-Ahmadi refinery struck. Iran IRGC vetting system for Hormuz transit reported. ~$2M fee per vessel." },
+  { date:"Mar 21", all:11,  tankers:3,  event:"~90 ships total crossed in first 3 weeks. EU/Japan joint statement on Hormuz security." },
+  { date:"Mar 22", all:13,  tankers:4,  event:"Trump 48hr ultimatum: open Hormuz or Iran power plants obliterated. China-bound Iran VLGC departs Gulf." },
+  { date:"Mar 23", all:15,  tankers:5,  event:"Trump delays Iran power plant strikes after positive talks. Partial de-escalation signal. Selective IRGC corridor active." },
+  { date:"Mar 24", all:14,  tankers:5,  event:"Today. 16 AIS crossings in past 7 days. IRGC vetting system emerging. Iran, India, China, Pakistan in transit talks." },
+];
+
+function useOffset(spd) {
+  const [v, setV] = useState(0);
+  useEffect(() => {
+    let id, t = null;
+    const f = ts => {
+      if (t) setV(o => (o - spd * (ts - t) / 60) % 500);
+      t = ts;
+      id = requestAnimationFrame(f);
+    };
+    id = requestAnimationFrame(f);
+    return () => cancelAnimationFrame(id);
+  }, [spd]);
+  return v;
+}
+
+function WorldMap({ vis, cargoVis, selCp, onCp, selZone, onZone }) {
+  const ref = useRef(null);
+  const [topo, setTopo] = useState(null);
+  const [dims, setDims] = useState({ w: 900, h: 500 });
+  const off = useOffset(0.35);
+
+  useEffect(() => {
+    const load = () => fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json")
+      .then(r => r.json()).then(setTopo).catch(() => {});
+    if (window.topojson) { load(); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js";
+    s.onload = load;
+    document.head.appendChild(s);
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => {
+      const { width: w, height: h } = e.contentRect;
+      if (w > 10 && h > 10) setDims({ w: Math.floor(w), h: Math.floor(h) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const proj = d3.geoNaturalEarth1().scale(dims.w / 6.1).rotate([-15, 0]).translate([dims.w / 2, dims.h / 2]);
+  const path = d3.geoPath().projection(proj);
+  const grat = d3.geoGraticule().step([40, 40])();
+  const sph = { type: "Sphere" };
+  const countries = (topo && window.topojson)
+    ? window.topojson.feature(topo, topo.objects.countries).features : [];
+  const xy = (lat, lon) => proj([lon, lat]) || [null, null];
+
+  const routePts = [
+    [[29.5, -94.5], [9.0, -79.5], [8.0, -80.0], [18.0, -150.0], [34.5, 136.5]],
+    [[11.5, 43.5], [17.0, 41.0], [24.1, 38.0]],
+  ];
+  const routeCols = ["#9060d0", C.red];
+  const routeRpath = pts => path({ type: "Feature", geometry: { type: "LineString", coordinates: pts.map(([a, b]) => [b, a]) } });
+
+  return (
+    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+      <svg width={dims.w} height={dims.h} style={{ display: "block" }}>
+        <path d={path(sph)} fill="#03080f" />
+        <path d={path(grat)} fill="none" stroke="#0a1a28" strokeWidth={0.4} />
+        {countries.map((f, i) => <path key={i} d={path(f)} fill="#0d1e2e" stroke="#152838" strokeWidth={0.5} />)}
+        <path d={path(sph)} fill="none" stroke="#152838" strokeWidth={1} />
+
+        {routePts.map((pts, ri) => (
+          <g key={ri}>
+            <path d={routeRpath(pts)} fill="none" stroke={routeCols[ri]} strokeWidth={5} strokeOpacity={0.06} strokeLinecap="round" />
+            <path d={routeRpath(pts)} fill="none" stroke={routeCols[ri]} strokeWidth={1.5} strokeOpacity={0.35} strokeLinecap="round" />
+            <path d={routeRpath(pts)} fill="none" stroke={routeCols[ri]} strokeWidth={1.5} strokeOpacity={0.5} strokeLinecap="round" strokeDasharray="6,12" strokeDashoffset={off} />
+          </g>
+        ))}
+
+        {ZONES.map((z, i) => {
+          if (!vis[z.fleet] || !cargoVis[z.cargo]) return null;
+          const [cx, cy] = xy(z.lat, z.lon);
+          if (!cx) return null;
+          const fc = FLEET_COL[z.fleet] || C.dim;
+          const cc = z.cargo === "crude" ? C.crude : z.cargo === "lng" ? C.lng : C.product;
+          const isM = z.moving >= z.count - z.moving;
+          const isSel = selZone === i;
+          const r = Math.max(9, Math.min(20, 6 + z.count * 0.28));
+          return (
+            <g key={i} style={{ cursor: "pointer" }} onClick={() => onZone(isSel ? null : i)}>
+              {isSel && <circle cx={cx} cy={cy} r={r + 6} fill="none" stroke={fc} strokeWidth={1} strokeDasharray="3,4" opacity={0.5} />}
+              <circle cx={cx} cy={cy} r={r + 2} fill="none" stroke={fc + (isSel ? "88" : "44")} strokeWidth={1} />
+              <circle cx={cx} cy={cy} r={r} fill={cc + (isSel ? "28" : "14")} stroke={cc + (isSel ? "cc" : "55")} strokeWidth={1} />
+              <text x={cx} y={cy + 4} textAnchor="middle" fill={C.bright} fontSize={9} fontWeight={600} fontFamily="monospace" style={{ pointerEvents: "none" }}>{z.count}</text>
+              {isM && <circle cx={cx + r - 1} cy={cy - r + 1} r={2} fill={C.green} opacity={0.85} />}
+            </g>
+          );
+        })}
+
+        {CPS.map(cp => {
+          const [x, y] = xy(cp.lat, cp.lon);
+          if (!x) return null;
+          const isSel = selCp === cp.id;
+          const today = cpTotal(cp, "today");
+          const normal = cpTotal(cp, "normal");
+          const pct = normal > 0 ? Math.min(100, Math.round(today / normal * 100)) : 0;
+          const barW = Math.max(2, Math.round(pct * 28 / 100));
+          return (
+            <g key={cp.id} style={{ cursor: "pointer" }} onClick={() => onCp(isSel ? null : cp.id)}>
+              {(cp.status === "CLOSED" || cp.status === "ALERT") && !isSel &&
+                <circle cx={x} cy={y} r={18} fill={cp.col + "08"} stroke={cp.col + "28"} strokeWidth={1} />}
+              {isSel && <circle cx={x} cy={y} r={24} fill={cp.col + "10"} stroke={cp.col} strokeWidth={1} strokeDasharray="3,3" opacity={0.7} />}
+              <line x1={x - 7} y1={y} x2={x + 7} y2={y} stroke={cp.col} strokeWidth={isSel ? 2 : 1.5} />
+              <line x1={x} y1={y - 7} x2={x} y2={y + 7} stroke={cp.col} strokeWidth={isSel ? 2 : 1.5} />
+              <circle cx={x} cy={y} r={2.5} fill={cp.col} />
+              <text x={x} y={y - 11} textAnchor="middle" fill={cp.col} fontSize={8} fontFamily="monospace" fontWeight={isSel ? 700 : 400} style={{ pointerEvents: "none" }}>{cp.name}</text>
+              <text x={x} y={y + 18} textAnchor="middle" fill={cp.col} fontSize={11} fontWeight={700} fontFamily="monospace" style={{ pointerEvents: "none" }}>{today}</text>
+              <rect x={x - 14} y={y + 20} width={28} height={3} rx={1} fill={cp.col + "20"} />
+              <rect x={x - 14} y={y + 20} width={barW} height={3} rx={1} fill={cp.col + (isSel ? "bb" : "66")} />
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function TimelineModal({ onClose }) {
+  const [hover, setHover] = useState(null);
+  const W = 660, H = 210;
+  const PAD = { t: 18, r: 14, b: 56, l: 42 };
+  const cW = W - PAD.l - PAD.r;
+  const cH = H - PAD.t - PAD.b;
+  const maxV = 160;
+  const xS = cW / (TIMELINE.length - 1);
+  const yS = v => cH - (v / maxV) * cH;
+  const allPts = TIMELINE.map((d, i) => PAD.l + i * xS + "," + (PAD.t + yS(d.all))).join(" ");
+  const tnkPts = TIMELINE.map((d, i) => PAD.l + i * xS + "," + (PAD.t + yS(d.tankers))).join(" ");
+  const areaFill = PAD.l + "," + (PAD.t + cH) + " " + tnkPts + " " + (PAD.l + (TIMELINE.length - 1) * xS) + "," + (PAD.t + cH);
+  const crisisI = TIMELINE.findIndex(d => d.date === "Feb 28");
+  const hd = hover !== null ? TIMELINE[hover] : null;
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(5,9,15,0.92)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: C.panel, border: "1px solid " + C.edge, borderRadius: 10, padding: "20px 22px", maxWidth: 720, width: "95vw" }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontFamily: "Georgia,serif", fontSize: 16, color: C.bright, marginBottom: 3 }}>Strait of Hormuz — Daily Traffic Since February 2026</div>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.06em" }}>
+              All vessels (grey) and tankers (amber) — Sources: CSIS, Lloyd's List, IMF PortWatch, WorldwideAIS, S+P Global
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "0 0 0 14px", flexShrink: 0 }}>x</button>
+        </div>
+
+        <svg width="100%" viewBox={"0 0 " + W + " " + H} style={{ display: "block", overflow: "visible" }}>
+          <rect x={PAD.l + crisisI * xS} y={PAD.t} width={cW - crisisI * xS} height={cH} fill="rgba(217,64,64,0.05)" />
+          <line x1={PAD.l + crisisI * xS} y1={PAD.t - 5} x2={PAD.l + crisisI * xS} y2={PAD.t + cH} stroke={C.red} strokeWidth={1} strokeDasharray="3,4" opacity={0.6} />
+          <text x={PAD.l + crisisI * xS + 4} y={PAD.t + 8} fill={C.red} fontSize={8} fontFamily="monospace">Feb 28 crisis</text>
+
+          {[0, 30, 60, 90, 120, 150].map(v => (
+            <g key={v}>
+              <line x1={PAD.l} y1={PAD.t + yS(v)} x2={PAD.l + cW} y2={PAD.t + yS(v)} stroke={C.edge} strokeWidth={0.5} />
+              <text x={PAD.l - 5} y={PAD.t + yS(v) + 4} textAnchor="end" fill={C.dim} fontSize={8} fontFamily="monospace">{v}</text>
+            </g>
+          ))}
+
+          <polygon points={areaFill} fill={C.crude + "18"} />
+          <polyline points={allPts} fill="none" stroke={C.text} strokeWidth={1.5} strokeOpacity={0.35} strokeLinejoin="round" />
+          <polyline points={tnkPts} fill="none" stroke={C.crude} strokeWidth={2} strokeLinejoin="round" />
+
+          {TIMELINE.map((d, i) => {
+            if (!d.event) return null;
+            const cx = PAD.l + i * xS;
+            const cy = PAD.t + yS(d.tankers);
+            return <circle key={i} cx={cx} cy={cy} r={3.5} fill={C.crude} stroke={C.bg} strokeWidth={1} />;
+          })}
+
+          {TIMELINE.map((d, i) => {
+            const x = PAD.l + i * xS;
+            return (
+              <rect key={i} x={x - xS / 2} y={PAD.t} width={xS} height={cH} fill="transparent" onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }} />
+            );
+          })}
+
+          {hover !== null && (() => {
+            const x = PAD.l + hover * xS;
+            const ty = PAD.t + yS(TIMELINE[hover].tankers);
+            const ay = PAD.t + yS(TIMELINE[hover].all);
+            return (
+              <g>
+                <line x1={x} y1={PAD.t} x2={x} y2={PAD.t + cH} stroke={C.bright} strokeWidth={0.8} opacity={0.25} />
+                <circle cx={x} cy={ty} r={4} fill={C.crude} />
+                <circle cx={x} cy={ay} r={3} fill={C.text} opacity={0.6} />
+              </g>
+            );
+          })()}
+
+          {TIMELINE.map((d, i) => {
+            if (i % 2 !== 0) return null;
+            return <text key={i} x={PAD.l + i * xS} y={PAD.t + cH + 13} textAnchor="middle" fill={C.dim} fontSize={7.5} fontFamily="monospace">{d.date}</text>;
+          })}
+
+          <line x1={PAD.l} y1={PAD.t + cH} x2={PAD.l + cW} y2={PAD.t + cH} stroke={C.edge} strokeWidth={1} />
+          <line x1={PAD.l} y1={PAD.t} x2={PAD.l} y2={PAD.t + cH} stroke={C.edge} strokeWidth={1} />
+        </svg>
+
+        <div style={{ minHeight: 50, marginTop: 8, padding: "8px 12px", background: C.bg, border: "1px solid " + C.edge, borderRadius: 5, fontSize: 9 }}>
+          {hd ? (
+            <div>
+              <div style={{ display: "flex", gap: 18, marginBottom: 3 }}>
+                <span style={{ color: C.dim }}>{hd.date}</span>
+                <span style={{ color: C.crude }}>Tankers: <strong style={{ fontSize: 13, fontFamily: "Georgia,serif" }}>{hd.tankers}</strong></span>
+                <span style={{ color: C.text, opacity: 0.6 }}>All vessels: <strong>{hd.all}</strong></span>
+                <span style={{ color: C.dim }}>vs normal: <strong style={{ color: hd.tankers < 30 ? C.red : hd.tankers < 50 ? C.amber : C.green }}>{Math.round(hd.tankers / 60 * 100)}%</strong></span>
+              </div>
+              {hd.event && <div style={{ color: C.dim, lineHeight: 1.6 }}>{hd.event}</div>}
+            </div>
+          ) : (
+            <span style={{ color: C.dim, fontStyle: "italic" }}>Hover over chart to see daily detail and key events</span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 9, color: C.dim }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 16, height: 2, background: C.crude, borderRadius: 1 }} />
+            <span style={{ color: C.text }}>Tanker traffic</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 16, height: 2, background: C.text, opacity: 0.4, borderRadius: 1 }} />
+            <span>All vessel types</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.crude }} />
+            <span>Key event</span>
+          </div>
+          <div style={{ flex: 1, textAlign: "right", fontStyle: "italic" }}>Pre-crisis normal: ~60 tankers/day</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CpRow({ cp, isSel, onClick }) {
+  const today = cpTotal(cp, "today");
+  const normal = cpTotal(cp, "normal");
+  const pct = normal > 0 ? Math.min(100, Math.round(today / normal * 100)) : 0;
+  const delta = today - normal;
+  const cargoTypes = ["crude", "lng", "prod"];
+  const cargoLabels = { crude: "Crude", lng: "LNG", prod: "Prod" };
+  const cargoCols = { crude: C.crude, lng: C.lng, prod: C.product };
+  const fleets = [
+    { k: "jp",    col: C.jp,    lbl: "JP"  },
+    { k: "cn",    col: C.cn,    lbl: "CN"  },
+    { k: "kr",    col: C.kr,    lbl: "KR"  },
+    { k: "ind",   col: C.ind,   lbl: "IN"  },
+    { k: "other", col: C.dim,   lbl: "OTH" },
+  ];
+
+  return (
+    <div
+      onClick={onClick}
+      style={{ borderBottom: "1px solid " + C.edge, cursor: "pointer", background: isSel ? C.bg : "transparent", borderLeft: isSel ? "2px solid " + cp.col : "2px solid transparent", transition: "background 0.1s" }}
+    >
+      <div style={{ padding: "9px 14px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div style={{ fontSize: 10, color: isSel ? C.bright : C.text }}>{cp.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <div style={{ fontFamily: "Georgia,serif", fontSize: 16, fontWeight: 700, color: cp.col }}>{today}</div>
+            <div style={{ fontSize: 7, padding: "1px 5px", borderRadius: 2, background: cp.col + "18", border: "1px solid " + cp.col + "33", color: cp.col, letterSpacing: "0.08em" }}>{cp.status}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+          {cargoTypes.map(ct => (
+            <div key={ct} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 8 }}>
+              <span style={{ color: cargoCols[ct], fontWeight: 600 }}>{cp[ct].today}</span>
+              <span style={{ color: C.dim }}>{cargoLabels[ct]}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ height: 3, borderRadius: 2, background: C.edge, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: pct + "%", background: cp.col, borderRadius: 2, opacity: 0.6 }} />
+        </div>
+      </div>
+
+      {isSel && (
+        <div style={{ padding: "0 14px 12px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+            <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700, color: cp.col, lineHeight: 1 }}>{today}</div>
+            <div>
+              <div style={{ fontSize: 7, color: C.dim, letterSpacing: "0.08em" }}>ALL TYPES 24H</div>
+              <div style={{ fontSize: 9, color: delta < 0 ? C.red : C.green, fontWeight: 600 }}>{delta > 0 ? "+" : ""}{delta} vs normal ({normal}/day)</div>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 0 }}>
+              {cargoTypes.map(ct => {
+                const d = cp[ct];
+                const np = d.normal > 0 ? Math.round(d.today / d.normal * 100) : 0;
+                const dd = d.today - d.normal;
+                return (
+                  <div key={ct} style={{ flex: 1, borderRight: "1px solid " + C.edge, padding: "6px 7px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 3 }}>
+                      <span style={{ fontSize: 8, color: cargoCols[ct], letterSpacing: "0.07em", textTransform: "uppercase" }}>{cargoLabels[ct]}</span>
+                    </div>
+                    <div style={{ fontFamily: "Georgia,serif", fontSize: 15, fontWeight: 700, color: cargoCols[ct], lineHeight: 1 }}>{d.today}</div>
+                    <div style={{ fontSize: 8, color: C.dim, marginTop: 1 }}>of {d.normal} normal</div>
+                    <div style={{ fontSize: 8, color: dd < 0 ? C.red : dd > 0 ? C.green : C.dim, marginTop: 1 }}>{dd > 0 ? "+" : ""}{dd} ({np}%)</div>
+                    <div style={{ marginTop: 3, fontSize: 8, color: C.dim }}>
+                      <span style={{ color: C.text }}>{d.laden}</span> lad {" "} <span style={{ color: C.text }}>{d.ballast}</span> bal
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 7, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 3 }}>By flag</div>
+            <div style={{ height: 5, display: "flex", borderRadius: 2, overflow: "hidden", gap: 1, marginBottom: 3 }}>
+              {fleets.map(f => {
+                const w = today > 0 ? (cp[f.k] / today) * 100 : 0;
+                return w > 0 ? <div key={f.k} style={{ width: w + "%", background: f.col, minWidth: 2 }} /> : null;
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+              {fleets.map(f => (
+                <div key={f.k} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 8 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: f.col }} />
+                  <span style={{ color: f.col }}>{f.lbl}</span>
+                  <span style={{ color: C.dim }}>{cp[f.k]}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ fontSize: 9, color: C.dim, lineHeight: 1.65, fontStyle: "italic", borderTop: "1px solid " + C.edge, paddingTop: 7 }}>{cp.note}</div>
+          <a href={"https://www.marinetraffic.com/en/ais/home/centerx:" + cp.lon + "/centery:" + cp.lat + "/zoom:8"} target="_blank" rel="noopener" style={{ display: "inline-block", marginTop: 6, fontSize: 9, color: "#4a9ece", textDecoration: "none" }}>
+            Live AIS map
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [vis,          setVis]          = useState({ jp: true, cn: true, kr: true, ind: true });
+  const [cargoVis,     setCargoVis]     = useState({ crude: true, lng: true, product: true });
+  const [selCp,        setSelCp]        = useState("hormuz");
+  const [selZone,      setSelZone]      = useState(null);
+  const [tab,          setTab]          = useState("chokepoints");
+  const [showTimeline, setShowTimeline] = useState(false);
+
+  const now = new Date();
+  const jst = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const dateStr = jst.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+
+  const totalToday = CPS.reduce((a, c) => a + cpTotal(c, "today"), 0);
+  const alertCount = CPS.filter(c => c.status === "CLOSED" || c.status === "ALERT").length;
+
+  const handleCp = id => { setSelCp(id); setSelZone(null); if (id) setTab("chokepoints"); };
+  const disrupted = CPS.filter(c => c.status === "CLOSED" || c.status === "ALERT").map(c => c.id);
+  const handleDisrupted = () => {
+    setTab("chokepoints");
+    setSelZone(null);
+    // Cycle through disrupted chokepoints on each press
+    const curr = disrupted.indexOf(selCp);
+    const next = disrupted[(curr + 1) % disrupted.length];
+    setSelCp(next);
+  };
+  const handleZone = i => { setSelZone(i); setSelCp(null); if (i !== null) setTab("fleet"); };
+
+  const TabBtn = ({ id, label }) => (
+    <button
+      onClick={() => setTab(id)}
+      style={{ flex: 1, padding: "8px 4px", background: "none", border: "none", borderBottom: "2px solid " + (tab === id ? C.jp : "transparent"), color: tab === id ? C.bright : C.dim, cursor: "pointer", fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ background: C.bg, color: C.text, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+      <div style={{ background: C.panel, borderBottom: "1px solid " + C.edge, height: 48, display: "flex", alignItems: "center", padding: "0 14px", gap: 9, flexShrink: 0 }}>
+        <div style={{ fontFamily: "Georgia,serif", fontSize: 16, fontWeight: 700, color: C.bright, whiteSpace: "nowrap" }}>
+          NEA Tanker <span style={{ color: C.jp, fontStyle: "italic", fontWeight: 400 }}>Daily</span>
+        </div>
+        <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.07em" }}>{dateStr} JST</div>
+        <div style={{ flex: 1 }} />
+
+        {CARGO.map(ct => (
+          <button key={ct.id} onClick={() => setCargoVis(v => ({ ...v, [ct.id]: !v[ct.id] }))} style={{ display: "flex", alignItems: "center", gap: 4, background: cargoVis[ct.id] ? ct.col + "18" : "transparent", border: "1px solid " + (cargoVis[ct.id] ? ct.col + "55" : C.rim), borderRadius: 4, padding: "4px 7px", fontSize: 9, color: cargoVis[ct.id] ? ct.col : C.dim, cursor: "pointer", opacity: cargoVis[ct.id] ? 1 : 0.4, transition: "all 0.15s" }}>
+            {ct.icon} {ct.label}
+          </button>
+        ))}
+
+        <div style={{ width: 1, height: 20, background: C.rim }} />
+
+        {Object.entries(FLEET_FLAG).map(([f, flag]) => (
+          <button key={f} onClick={() => setVis(v => ({ ...v, [f]: !v[f] }))} style={{ background: vis[f] ? FLEET_COL[f] + "18" : "transparent", border: "1px solid " + (vis[f] ? FLEET_COL[f] + "55" : C.rim), borderRadius: 4, padding: "4px 7px", fontSize: 9, color: vis[f] ? FLEET_COL[f] : C.dim, cursor: "pointer", opacity: vis[f] ? 1 : 0.4, transition: "all 0.15s" }}>
+            {flag}
+          </button>
+        ))}
+
+        <div style={{ width: 1, height: 20, background: C.rim }} />
+
+        <button onClick={() => setShowTimeline(true)} style={{ background: "rgba(232,160,48,0.1)", border: "1px solid " + C.amber + "44", borderRadius: 4, padding: "4px 9px", fontSize: 9, color: C.amber, cursor: "pointer", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>
+          Hormuz Chart
+        </button>
+
+        {alertCount > 0 && (
+          <button onClick={handleDisrupted} style={{ background: C.red + "15", border: "1px solid " + C.red + "44", borderRadius: 4, padding: "4px 9px", fontSize: 9, color: C.red, letterSpacing: "0.07em", whiteSpace: "nowrap", cursor: "pointer", transition: "all 0.15s" }}>
+            ⚠ {alertCount} disrupted
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+
+        <div style={{ flex: 1, position: "relative", background: "#030810", overflow: "hidden" }}>
+          <WorldMap vis={vis} cargoVis={cargoVis} selCp={selCp} onCp={handleCp} selZone={selZone} onZone={handleZone} />
+
+          <div style={{ position: "absolute", bottom: 10, left: 10, background: "rgba(5,9,15,0.9)", border: "1px solid " + C.edge, borderRadius: 5, padding: "8px 10px", fontSize: 8, lineHeight: 1.9, pointerEvents: "none" }}>
+            <div style={{ color: C.dim, letterSpacing: "0.12em", fontSize: 7, textTransform: "uppercase", marginBottom: 3 }}>Fleet zones</div>
+            <div style={{ display: "flex", gap: 9, marginBottom: 2 }}>
+              {CARGO.map(ct => <span key={ct.id} style={{ color: ct.col }}>{ct.icon} {ct.label}</span>)}
+            </div>
+            <div style={{ display: "flex", gap: 9, marginBottom: 2 }}>
+              {Object.entries(FLEET_FLAG).map(([f, flag]) => <span key={f} style={{ color: FLEET_COL[f] }}>{flag}</span>)}
+            </div>
+            <div style={{ borderTop: "1px solid " + C.edge, paddingTop: 3, color: C.dim }}>
+              Chokepoint number = 24h tankers
+            </div>
+          </div>
+
+          {selZone !== null && ZONES[selZone] && (() => {
+            const z = ZONES[selZone];
+            const fc = FLEET_COL[z.fleet] || C.dim;
+            const cc = z.cargo === "crude" ? C.crude : z.cargo === "lng" ? C.lng : C.product;
+            const isM = z.moving >= z.count - z.moving;
+            return (
+              <div style={{ position: "absolute", top: 10, right: 10, zIndex: 20, background: C.panel, border: "1px solid " + fc + "44", borderRadius: 8, padding: "12px 14px", width: 240, boxShadow: "0 8px 32px rgba(0,0,0,0.75)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, paddingBottom: 7, borderBottom: "1px solid " + C.edge }}>
+                  <div>
+                    <div style={{ fontSize: 8, color: fc, letterSpacing: "0.09em", textTransform: "uppercase", marginBottom: 2 }}>{FLEET_FLAG[z.fleet]} {FLEET_NAME[z.fleet]}</div>
+                    <div style={{ fontFamily: "Georgia,serif", fontSize: 13, color: C.bright, lineHeight: 1.3 }}>{z.name}</div>
+                  </div>
+                  <button onClick={() => setSelZone(null)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 17, lineHeight: 1, padding: 0, flexShrink: 0, marginLeft: 8 }}>x</button>
+                </div>
+                <div style={{ display: "flex", gap: 14, marginBottom: 8 }}>
+                  <div><div style={{ fontSize: 7, color: C.dim, marginBottom: 2 }}>VESSELS</div><div style={{ fontFamily: "Georgia,serif", fontSize: 20, color: fc, fontWeight: 700, lineHeight: 1 }}>{z.count}</div></div>
+                  <div><div style={{ fontSize: 7, color: C.dim, marginBottom: 2 }}>MOVING</div><div style={{ fontSize: 12, color: C.green, fontWeight: 600 }}>{z.moving}</div></div>
+                  <div><div style={{ fontSize: 7, color: C.dim, marginBottom: 2 }}>STATIC</div><div style={{ fontSize: 12, color: C.amber, fontWeight: 600 }}>{z.count - z.moving}</div></div>
+                  <div><div style={{ fontSize: 7, color: C.dim, marginBottom: 2 }}>CARGO</div><div style={{ fontSize: 9, color: cc, marginTop: 2 }}>{z.cargo === "lng" ? "LNG/LPG" : z.cargo.toUpperCase()}</div></div>
+                </div>
+                <div style={{ fontSize: 9, color: C.dim, lineHeight: 1.65, fontStyle: "italic" }}>{z.note}</div>
+                <div style={{ marginTop: 7, fontSize: 8, padding: "3px 7px", borderRadius: 3, textAlign: "center", letterSpacing: "0.06em", background: isM ? "rgba(56,176,112,0.1)" : "rgba(232,160,48,0.1)", border: "1px solid " + (isM ? "rgba(56,176,112,0.25)" : "rgba(232,160,48,0.25)"), color: isM ? C.green : C.amber }}>
+                  {isM ? Math.round(z.moving / z.count * 100) + "% MOVING" : Math.round((z.count - z.moving) / z.count * 100) + "% STATIC"}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        <div style={{ width: 265, background: C.panel, borderLeft: "1px solid " + C.edge, display: "flex", flexDirection: "column", overflow: "hidden", flexShrink: 0 }}>
+          <div style={{ display: "flex", borderBottom: "1px solid " + C.edge, flexShrink: 0 }}>
+            <TabBtn id="chokepoints" label="Chokepoints" />
+            <TabBtn id="fleet" label="Fleet" />
+          </div>
+
+          {tab === "chokepoints" && (
+            <>
+              <div style={{ padding: "9px 14px", borderBottom: "1px solid " + C.edge, flexShrink: 0, display: "flex", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontSize: 7, letterSpacing: "0.14em", textTransform: "uppercase", color: C.dim, marginBottom: 1 }}>All chokepoints 24h</div>
+                  <div style={{ fontFamily: "Georgia,serif", fontSize: 21, fontWeight: 700, color: C.jp, lineHeight: 1 }}>{totalToday}</div>
+                </div>
+                <div style={{ flex: 1 }} />
+                <div style={{ display: "flex", gap: 4 }}>
+                  {CPS.map(cp => (
+                    <div key={cp.id} onClick={() => handleCp(selCp === cp.id ? null : cp.id)} style={{ width: 7, height: 7, borderRadius: "50%", background: cp.col, cursor: "pointer", opacity: selCp === cp.id ? 1 : 0.45 }} />
+                  ))}
+                </div>
+              </div>
+              <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+                {CPS.map(cp => (
+                  <CpRow key={cp.id} cp={cp} isSel={selCp === cp.id} onClick={() => handleCp(selCp === cp.id ? null : cp.id)} />
+                ))}
+              </div>
+              <div style={{ padding: "6px 14px", borderTop: "1px solid " + C.edge, fontSize: 8, color: C.dim, lineHeight: 1.6, flexShrink: 0 }}>
+                Estimates based on EIA, IMF PortWatch, Vortexa data. Click any chokepoint on map.
+              </div>
+            </>
+          )}
+
+          {tab === "fleet" && (
+            <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+              {["jp", "cn", "kr", "ind"].map(f => {
+                const zones = ZONES.filter(z => z.fleet === f && cargoVis[z.cargo]);
+                if (zones.length === 0) return null;
+                const col = FLEET_COL[f];
+                const total = zones.reduce((a, z) => a + z.count, 0);
+                const moving = zones.reduce((a, z) => a + z.moving, 0);
+                return (
+                  <div key={f} style={{ borderBottom: "1px solid " + C.edge }}>
+                    <div style={{ padding: "8px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: col, flexShrink: 0 }} />
+                      <div style={{ fontFamily: "Georgia,serif", fontSize: 13, color: C.bright, flex: 1 }}>{FLEET_FLAG[f]} {FLEET_NAME[f]}</div>
+                      <div style={{ fontSize: 9, color: C.dim }}>{total} vessels <span style={{ color: C.green }}>({moving} moving)</span></div>
+                    </div>
+                    {zones.map(z => {
+                      const idx = ZONES.indexOf(z);
+                      const isSel = selZone === idx;
+                      const isM = z.moving >= z.count - z.moving;
+                      const cc = z.cargo === "crude" ? C.crude : z.cargo === "lng" ? C.lng : C.product;
+                      const ci = z.cargo === "crude" ? "🛢" : z.cargo === "lng" ? "🧊" : "⛽";
+                      return (
+                        <div key={idx} onClick={() => handleZone(isSel ? null : idx)} style={{ borderBottom: "1px solid rgba(20,34,52,0.5)", cursor: "pointer", background: isSel ? C.bg : "transparent", borderLeft: isSel ? "2px solid " + col : "2px solid transparent" }}>
+                          <div style={{ padding: "5px 14px 5px 22px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 10, color: C.text, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{z.name}</div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                                <span style={{ fontSize: 9 }}>{ci}</span>
+                                <span style={{ fontSize: 8, color: cc, letterSpacing: "0.06em" }}>{z.cargo === "lng" ? "LNG/LPG" : z.cargo.toUpperCase()}</span>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, marginLeft: 6 }}>
+                              <div style={{ fontSize: 11, color: C.bright, fontWeight: 500, minWidth: 18, textAlign: "right" }}>{z.count}</div>
+                              <div style={{ fontSize: 8, padding: "1px 4px", borderRadius: 2, background: isM ? "rgba(56,176,112,0.1)" : "rgba(232,160,48,0.1)", border: "1px solid " + (isM ? "rgba(56,176,112,0.25)" : "rgba(232,160,48,0.25)"), color: isM ? C.green : C.amber }}>{isM ? "MOV" : "STA"}</div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ height: 24, borderTop: "1px solid " + C.edge, display: "flex", alignItems: "center", padding: "0 14px", fontSize: 8, color: C.dim, letterSpacing: "0.06em", flexShrink: 0 }}>
+            AI-synthesised snapshot {" · "} {dateStr}
+          </div>
+        </div>
+      </div>
+
+      {showTimeline && <TimelineModal onClose={() => setShowTimeline(false)} />}
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
